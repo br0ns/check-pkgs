@@ -43,7 +43,7 @@ Four lists are saved in `~/.pkgs`:
 
  - `delete.pkgs`: Packages that must not be installed.
 
- - `reming.pkgs`: Packages that the user has not decided whether should be
+ - `remind.pkgs`: Packages that the user has not decided whether should be
    installed or not.  Packages on this list are automatically deleted after
    five days.
 
