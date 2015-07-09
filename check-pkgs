@@ -1,9 +1,12 @@
 #!/usr/bin/env python2.7
-import sys, copy, re, os, string, argparse, subprocess, pwd, fcntl, time, atexit
+import sys, re, os, string, subprocess, pwd, fcntl, time, atexit, random
 
 # Save package lists in ~/.pkgs/ where "~" refers to the home dir of the owner
 # of this file
 LIST_DIR = '%s/.pkgs/' % pwd.getpwuid(os.stat(__file__).st_uid).pw_dir
+
+# Flag for printing out extra stuff
+VERBOSE = False
 
 def die (s = '', exit_code = 1):
     print >>sys.stderr, s
@@ -344,13 +347,6 @@ def do_install (*pkgs):
     do_system('sudo apt-get install --no-install-recommends %s' % \
               name_list(pkgs))
 
-def do_autoremove():
-    do_system('sudo apt-get autoremove')
-
-def can_autoremove():
-    s = subprocess.check_output('apt-get -s autoremove', shell = True)
-    return int(re.findall(r', (\d+) to remove ', s)[0])
-
 def read_list (lst):
     filename = '%s/%s.pkgs' % (LIST_DIR, lst)
     if not os.path.exists(filename):
@@ -592,6 +588,43 @@ def step_delete ():
                 print 'What do?'
 
 def get_orphaned ():
+    """Consider the directed graph where the nodes are all the installed
+    packages on the system and the vertices are all package dependencies.
+
+    We say that a package A dominates another package B, whenever there is a
+    path in this graph from A to B, but no path from B to A (i.e. if A somehow
+    depends on B, but B does not depend on A).
+
+    NOTE: We will ignore dependencies of the form A=>B|C, where both B and C are
+    installed. This can in principle lead to both false-positives and
+    false-negatives, but only in cases where the package maintainers have done
+    some very sketchy stuff.
+
+    This function calculates the least set of nodes, such that every installed
+    package is either in the set or is dominated by a node in the set.
+
+    It calculates it by the following algorithm:
+
+    1) Pick an arbitrary node N. If the graph is empty, you are done.
+    2) Split the graph into 4 parts:
+       - The set of ancestors,   i.e. any node A with a path A=>N.
+       - The set of siblings,    i.e. any node A with a path A=>N and N=>A.
+       - The set of descendants, i.e. any node A with a path N=>A.
+       - The set of unrelated nodes, i.e. those without a path to N.
+    3) If the set of ancestors is empty, then the set of siblings must
+       be part of the solution, since no other nodes dominates them.
+       If it is non-empty, then the set of siblings cannot be part of the
+       solution.
+    4) In either case we remove the set of siblings and descendants
+       from the graph, and continue from step 1.
+
+    After calculating this set, we remove the all sibling-sets where at least
+    one of the nodes in the set have been marked as wanted by the user.
+
+    The orphaned set, is exactly the set of dominant nodes with the
+    wanted-by-user nodes and their dependencies removed.
+
+    """
     # Get the packages
     pkgs = parse_dpkg()
 
@@ -622,6 +655,61 @@ def get_orphaned ():
     # the lists are dictionaries
     deps_map = build_dependency_map(pkgs, name_map)
 
+    # Turn the dependcy map into a graph.
+    for pkg in pkgs:
+        pkg['__children'] = []
+        pkg['__parents'] = []
+    for a, bs in deps_map:
+        if len(bs) != 1:
+            continue
+        b = bs[0]
+        a['__children'].append(b)
+        b['__parents'].append(a)
+    for pkg in pkgs:
+        pkg['__children'] = uniqify(pkg['__children'])
+        pkg['__parents'] = uniqify(pkg['__parents'])
+
+    # Function for remove a node along with all its descendants.
+    def remove_descendants(node):
+        if '__removed' not in node:
+            node['__removed'] = True
+            for child in list(node['__children']):
+                remove_descendants(child)
+
+    # Function for finding a node along with all its ancestors.
+    def find_ancestors(node):
+        node['__mark'] = True
+        todo = [node]
+
+        seen = []
+        while todo:
+            cur = todo.pop()
+            seen.append(cur)
+            for parent in cur['__parents']:
+                if '__mark' not in parent:
+                    parent['__mark'] = True
+                    todo.append(parent)
+        for node in seen:
+            del node['__mark']
+        return seen
+
+    # Now calculate set the of dominant nodes.
+    dominant_cycles = []
+    todo = list(pkgs)
+    random.shuffle(todo)
+    next_node = None
+    while todo:
+        cur = todo.pop()
+        if '__removed' in cur:
+            continue
+        ancestors = find_ancestors(cur)
+        remove_descendants(cur)
+        for node in ancestors:
+            if '__removed' not in node:
+                break
+        else:
+            dominant_cycles.append(ancestors)
+
     # Read the lists
     dowant_list = read_list('dowant')
     ignore_list = read_list('ignore')
@@ -633,57 +721,34 @@ def get_orphaned ():
                   pkgs_on_list(remind_list))
     regex = re.compile('^%s$' % '|'.join(ok_pkgs))
 
-    # Try to figure out which packages are needed. We only want to look at
-    # dependencies where there is only a single package fulfilling the
-    # dependency.
-    deps_map_simple = [(a, bs[0]) for a, bs in deps_map if len(bs) == 1]
+    # Remove every node on a wanted list
+    orphaned = []
+    for curcycle in dominant_cycles:
+        wanted = []
+        for pkg in curcycle:
+            pkg['__dominant'] = True
+            if regex.match(qualified_name(pkg)):
+                wanted.append(pkg)
+        if len(wanted) == 0:
+            orphaned += curcycle
+        elif VERBOSE and len(wanted) > 1:
+            print "Cyclic chain of wanted packages:",
+            for pkg in wanted:
+                print qualified_name(pkg),
+            print
 
-    # We do flood-filling from the packages in the dowant, ignore and remind
-    # lists. We use a simple, quadratic implementation, since the best
-    # implementation is not that much better on so few packages.
-    for pkg in pkgs:
-        if regex.match(qualified_name(pkg)):
-            pkg['NEEDED'] = True
+    if VERBOSE:
+        for pkg in pkgs:
+            if '__dominant' not in pkg and regex.match(qualified_name(pkg)):
+                print "Non-dominant, but wanted package:", qualified_name(pkg)
 
-    go = True
-    while go:
-        go = False
-        for a, b in deps_map_simple:
-            if a.get('NEEDED') and not b.get('NEEDED'):
-                b['NEEDED'] = True
-                go = True
-
-    # Only consider packages that are not NEEDED, i.e. "orphaned" packages
-    orphaned = [pkg for pkg in pkgs if not pkg.get('NEEDED')]
-
-    # Among the orphaned packages we find the ones that are not needed by others
-    for p in orphaned:
-        # Darn you unhashable `dict'
-        p['NEEDED_BY'] = []
-    for a, b in deps_map_simple:
-        # Package `a' needs `b', that is `b' is NEEDED_BY `a'
-        if b not in orphaned:
-            continue
-        # Caveat: circular dependencies can and do exist; if we find one, we
-        # break the circle here and mark this package as needed
-        if b in a['NEEDED_BY']:
-            continue
-        # If `b' is NEEDED_BY `a' and `a' is NEEDED_BY `c', then `b' is also
-        # NEEDED_BY `c'; we need to record this to discover circular
-        # dependencies
-        b['NEEDED_BY'] = uniqify([a] + a['NEEDED_BY'] + b['NEEDED_BY'])
-
-    return [pkg for pkg in orphaned if not pkg['NEEDED_BY']]
+    return orphaned
 
 def step_decide ():
     dowant_list = read_list('dowant')
     ignore_list = read_list('ignore')
     remind_list = read_remind_list()
     delete_list = read_list('delete')
-
-    # n = can_autoremove()
-    # if n and yesno('APT can autoremove %d packages;  Do it?' % n, True):
-    #     do_autoremove()
 
     pkgs = get_orphaned()
 
@@ -761,7 +826,7 @@ def step_decide ():
         pkgs.pop(0)
 
 def usage ():
-    print 'usage: %s [--list orphaned|dowant|ignore|remind|delete]' % \
+    print 'usage: %s [--verbose] [--list orphaned|dowant|ignore|remind|delete]' % \
         os.path.basename(sys.argv[0])
     print
     print 'Pro tip:'
@@ -770,6 +835,7 @@ def usage ():
     sys.exit(1)
 
 def main ():
+    global VERBOSE
     # If this script is called as a post-invoke hook from APT and then itself
     # calls apt-get we run into trouble: apt-get releases the
     # "/var/cache/apt/archives/lock" lock file *after* the post-invoke hooks
@@ -812,6 +878,9 @@ def main ():
     pidfile.seek(0)
 
     # And go!
+    while '--verbose' in sys.argv:
+        VERBOSE = True
+        sys.argv.remove('--verbose')
     if not os.path.exists(LIST_DIR):
         print 'Creating directory: %s' % LIST_DIR
         os.mkdir(LIST_DIR)
