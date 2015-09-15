@@ -887,6 +887,9 @@ def main ():
     if not os.path.exists(LIST_DIR):
         print 'Creating directory: %s' % LIST_DIR
         os.mkdir(LIST_DIR)
+    if len(sys.argv) == 2 and sys.argv[1] == 'remind':
+        sys.argv.pop(1)
+        os.unlink('%s/remind.pkgs' % LIST_DIR)
     if len(sys.argv) == 1:
         step_deinstall()
         step_dowant()
