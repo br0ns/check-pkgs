@@ -771,6 +771,7 @@ def step_decide ():
                        ('D', 'Delete every orphaned package!'),
                        ('u', 'Delete this package and mark is as un-wanted'),
                        ('U', 'Delete and mark every orphaned package as un-wanted'),
+                       ('q', 'I can\'t deal with this right now; quit!'),
                       ], 'r')
         if   opt == 'w':
             add_to_list(qualified_name(pkg), dowant_list)
@@ -822,6 +823,8 @@ def step_decide ():
                 pkgs = get_orphaned()
             if opt == 'U':
                 write_list('delete', delete_list)
+            break
+        elif opt == 'q':
             break
         pkgs.pop(0)
 
