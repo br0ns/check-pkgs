@@ -79,6 +79,38 @@ def optlist (opts, default, numbers = False):
                 pass
         print 'Please select one of ' + ', '.join(abbrevs)
 
+def selectfromlist(opts):
+    numlen = len(str(len(opts)))
+    for i, opt in enumerate(opts, 1):
+        lbl = '[%s]' % str(i).rjust(numlen)
+        print '  %s %s' % (lbl, opt)
+
+    prompt = 'Enter numbers or unique prefixes, separated by commas: '
+
+    while True:
+        sels = []
+        for sel in (s.strip() for s in raw_input(prompt).split(',')):
+            if sel.isdigit():
+                sel = int(sel) - 1
+                if sel < 0 or sel >= len(opts):
+                    print 'Invalid number: %d' % sel
+                    break
+                sels.append(sel)
+                continue
+            ms = []
+            for i, opt in enumerate(opts):
+                if opt.startswith(sel):
+                    ms.append(i)
+            if len(ms) == 0:
+                print 'Invalid prefix: %s' % sel
+                break
+            elif len(ms) > 1:
+                print 'Prefix is not unique: %s' % sel
+                break
+            sels.append(ms[0])
+        else:
+            return sels
+
 def plural (noun, amount):
     if hasattr(amount, '__len__'):
         amount = len(amount)
@@ -767,6 +799,7 @@ def step_decide ():
                        ('l', 'List orphaned packages'),
                        ('r', 'Remind me of this package later'),
                        ('R', 'I said later!  Remind me of everything later'),
+                       ('s', 'Select which packages to remind me of later'),
                        ('d', 'Good question; delete this package'),
                        ('D', 'Delete every orphaned package!'),
                        ('u', 'Delete this package and mark is as un-wanted'),
@@ -801,6 +834,13 @@ def step_decide ():
                 add_reminder(qualified_name(pkg), remind_list)
             write_list('remind', remind_list)
             break
+        elif opt == 's':
+            sels = selectfromlist(map(qualified_name, pkgs))
+            for i in sels:
+                add_reminder(qualified_name(pkgs[i]), remind_list)
+            write_list('remind', remind_list)
+            pkgs = [pkg for i, pkg in enumerate(pkgs) if i not in sels]
+            continue
         elif opt in ('d', 'u'):
             do_purge(pkg)
             if opt == 'u':
