@@ -929,7 +929,9 @@ def main ():
         os.mkdir(LIST_DIR)
     if len(sys.argv) == 2 and sys.argv[1] == 'remind':
         sys.argv.pop(1)
-        os.unlink('%s/remind.pkgs' % LIST_DIR)
+        path = '%sremind.pkgs' % LIST_DIR
+        if os.path.isfile(path):
+            os.unlink(path)
     if len(sys.argv) == 1:
         step_deinstall()
         step_dowant()
