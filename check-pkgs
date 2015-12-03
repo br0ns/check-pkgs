@@ -851,7 +851,7 @@ def step_decide ():
             continue
         elif opt in ('D', 'U'):
             if not yesno('Are you sure about this?  I will delete recursively' \
-                         ', you know.', False):
+                         ', you know.', True):
                 continue
             yes = yesno('Pass --yes flag to APT?', False)
             while pkgs:
