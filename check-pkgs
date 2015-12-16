@@ -190,6 +190,7 @@ def version_compatible(ver1, op, ver2):
     return cmps[op][version_compare(ver1, ver2)+1]
 
 def uniqify(vs):
+    return sorted(set(vs))
     res = []
     for v in vs:
         seen = False
@@ -201,13 +202,24 @@ def uniqify(vs):
             res.append(v)
     return res
 
-def qualified_name (pkg):
-    return '%s:%s' % (pkg['Package'], pkg['Architecture'])
+def qualified_name(pkg):
+    return pkg.setdefault('__qname',
+                          '%s:%s' % (pkg['Package'], pkg['Architecture']))
+
+# Packages are are just dictionaries build from dpkg's status file, but we add
+# the `__hash__` function to make much of the code simpler.
+class Package(dict):
+    def __hash__(self):
+        return self.setdefault('__hash', qualified_name(self).__hash__())
+    def __str__(self):
+        return qualified_name(self)
+    def __repr__(self):
+        return str(self)
 
 def parse_dpkg ():
     fd = open('/var/lib/dpkg/status')
     pkgs = []
-    pkg = {}
+    pkg = Package()
     must_fix = []
 
     rawdata = ''
@@ -218,9 +230,10 @@ def parse_dpkg ():
             # assert that the package is sane
             # info:
             #   http://www.fifi.org/doc/libapt-pkg-doc/dpkg-tech.html/ch1.html
+            #   http://manpages.ubuntu.com/manpages/wily/man1/dpkg.1.html
             want, flag, status = pkg['Status'].split()
             if any([flag != 'ok',
-                    want not in ('install', 'deinstall'),
+                    want not in ('install', 'deinstall', 'hold'),
                     status not in ('installed', 'config-files'),
                    ]):
                 must_fix.append(pkg)
@@ -228,7 +241,7 @@ def parse_dpkg ():
             pkg['__raw'] = rawdata
             pkgs.append(pkg)
             rawdata = ''
-            pkg = {}
+            pkg = Package()
             continue
 
         if line[0] == ' ':
@@ -249,6 +262,9 @@ def parse_dpkg ():
             print fmt % (qualified_name(pkg), pkg['Status'])
         print 'You must resolve these issues'
         sys.exit(1)
+
+    # A package's qualified name should uniquely identify it; check that
+    assert len(set(map(qualified_name, pkgs))) == len(pkgs)
 
     return pkgs
 
@@ -331,7 +347,7 @@ def build_dependency_map (pkgs, name_map):
             for dep_name in depend.split(' | '):
                 dependencies.extend(find_satisfies(pkg['Architecture'], dep_name))
             assert len(dependencies) >= 1
-            dependency_map.append((pkg, uniqify(dependencies)))
+            dependency_map.append((pkg, set(dependencies)))
 
     for pkg in pkgs:
         for n in ['Depends', 'Pre-Depends']:
@@ -351,19 +367,15 @@ def convert_to_regex(line, python = True):
     else:
         return '^' + line + '$'
 
-def get_regexes(filename, python = True):
-    lines = []
-    for line in open(filename):
-        line = line.strip()
-        if not line:
-            continue
-        lines.append(convert_to_regex(line, python))
-    return lines
-
 def do_system (cmd):
     ret = os.system(cmd)
     if ret != 0:
         sys.exit(ret)
+
+def sudo(cmd):
+    if os.getuid() != 0:
+        cmd = 'sudo ' + cmd
+    do_system(cmd)
 
 def name_list (pkgs):
     return ' '.join(pkg if isinstance(pkg, str) else qualified_name(pkg) \
@@ -371,13 +383,10 @@ def name_list (pkgs):
 
 def do_purge (*pkgs, **kwargs):
     yes = kwargs.get('yes', False)
-    do_system('sudo apt-get purge %s %s' % \
-              (name_list(pkgs),
-               '--yes' if yes else ''))
+    sudo('apt-get purge %s %s' % (name_list(pkgs), '--yes' if yes else ''))
 
 def do_install (*pkgs):
-    do_system('sudo apt-get install --no-install-recommends %s' % \
-              name_list(pkgs))
+    sudo('apt-get install --no-install-recommends %s' % name_list(pkgs))
 
 def read_list (lst):
     filename = '%s/%s.pkgs' % (LIST_DIR, lst)
@@ -619,6 +628,75 @@ def step_delete ():
                     print '  %s' % pkg
                 print 'What do?'
 
+def get_ok_matcher():
+    '''Return a function which will return the list on which a qualified name
+    appears or `None` if it is not on any list.
+    '''
+
+    def build_regex(lst):
+        pkgs = map(convert_to_regex, pkgs_on_list(lst))
+        return re.compile('^%s$' % '|'.join(pkgs))
+
+    dowant = build_regex(read_list('dowant'))
+    ignore = build_regex(read_list('ignore'))
+    remind = build_regex(read_remind_list())
+    lists = (('dowant', dowant),
+             ('ignore', ignore),
+             ('remind', remind),
+             )
+
+    def matcher(pkg):
+        for name, regex in lists:
+            if regex.match(qualified_name(pkg)):
+                return name
+
+    return matcher
+
+def get_pkg_graph():
+    # See `get_orphaned` below for details
+
+    # Get the packages
+    pkgs = parse_dpkg()
+
+    # We only care about installed files
+    pkgs = filter(is_installed, pkgs)
+
+    # The installed packages all have a qualified name
+    # e.g. "python-scipy:amd64". However other packages will only refer to
+    # the package as either "python-scipy" or "python-scipy:any". They might
+    # also refer to the packages by their virtual names such as
+    # "python-numpy-abi9" instead of "python-numpy". So we build a
+    # many-to-many relation mapping names to packages.
+    name_map = build_name_map(pkgs)
+
+    # From this many-to-many relation we build the dependency graph.  For
+    # instance we might have that pkg0 would have a dependency of the format
+    # (pkg1 | pkg2 | pkg3), (pkg4 | pkg5).  In this example, we might return
+    #
+    #   [(pkg0:i386, [pkg1-gtk:i386, pkg1-curses:i386, pkg3:all]),
+    #    (pkg0, [pkg4:i386])]
+    #
+    # Where the first element of the tuple is a string and the elements of
+    # the lists are dictionaries
+    deps_map = build_dependency_map(pkgs, name_map)
+
+    # Turn the dependcy map into a graph.
+    for pkg in pkgs:
+        pkg['__children'] = set()
+        pkg['__parents'] = set()
+    for a, bs in deps_map:
+        # Ignore alternatives
+        if len(bs) != 1:
+            continue
+        b = list(bs)[0]
+        a['__children'].add(b)
+        b['__parents'].add(a)
+    for pkg in pkgs:
+        pkg['__children'] = pkg['__children']
+        pkg['__parents'] = pkg['__parents']
+
+    return pkgs
+
 def get_orphaned ():
     """Consider the directed graph where the nodes are all the installed
     packages on the system and the vertices are all package dependencies.
@@ -657,76 +735,30 @@ def get_orphaned ():
     wanted-by-user nodes and their dependencies removed.
 
     """
-    # Get the packages
-    pkgs = parse_dpkg()
 
-    # We only care about installed files
-    i = 0
-    while i < len(pkgs):
-        pkg = pkgs[i]
-        if not is_installed(pkg):
-            pkgs.pop(i)
-        else:
-            i += 1
-    # The installed packages all have a qualified name
-    # e.g. "python-scipy:amd64". However other packages will only refer to
-    # the package as either "python-scipy" or "python-scipy:any". They might
-    # also refer to the packages by their virtual names such as
-    # "python-numpy-abi9" instead of "python-numpy". So we build a
-    # many-to-many relation mapping names to packages.
-    name_map = build_name_map(pkgs)
-
-    # From this many-to-many relation we build the dependency graph.  For
-    # instance we might have that pkg0 would have a dependency of the format
-    # (pkg1 | pkg2 | pkg3), (pkg4 | pkg5).  In this example, we might return
-    #
-    #   [(pkg0:i386, [pkg1-gtk:i386, pkg1-curses:i386, pkg3:all]),
-    #    (pkg0, [pkg4:i386])]
-    #
-    # Where the first element of the tuple is a string and the elements of
-    # the lists are dictionaries
-    deps_map = build_dependency_map(pkgs, name_map)
-
-    # Turn the dependcy map into a graph.
-    for pkg in pkgs:
-        pkg['__children'] = []
-        pkg['__parents'] = []
-    for a, bs in deps_map:
-        if len(bs) != 1:
-            continue
-        b = bs[0]
-        a['__children'].append(b)
-        b['__parents'].append(a)
-    for pkg in pkgs:
-        pkg['__children'] = uniqify(pkg['__children'])
-        pkg['__parents'] = uniqify(pkg['__parents'])
+    pkgs = get_pkg_graph()
 
     # Function for remove a node along with all its descendants.
     def remove_descendants(node):
         if '__removed' not in node:
             node['__removed'] = True
-            for child in list(node['__children']):
+            for child in node['__children']:
                 remove_descendants(child)
 
     # Function for finding a node along with all its ancestors.
     def find_ancestors(node):
-        node['__mark'] = True
-        todo = [node]
-
-        seen = []
+        todo = {node}
+        seen = set()
         while todo:
-            cur = todo.pop()
-            seen.append(cur)
-            for parent in cur['__parents']:
-                if '__mark' not in parent:
-                    parent['__mark'] = True
-                    todo.append(parent)
-        for node in seen:
-            del node['__mark']
+            pkg = todo.pop()
+            if pkg in seen:
+                continue
+            seen.add(pkg)
+            todo.update(pkg['__parents'])
         return seen
 
     # Now calculate set the of dominant nodes.
-    dominant_cycles = []
+    dominant_sets = []
     todo = list(pkgs)
     random.shuffle(todo)
     next_node = None
@@ -736,30 +768,19 @@ def get_orphaned ():
             continue
         ancestors = find_ancestors(cur)
         remove_descendants(cur)
-        for node in ancestors:
-            if '__removed' not in node:
-                break
-        else:
-            dominant_cycles.append(ancestors)
+        if all('__removed' in node for node in ancestors):
+            dominant_sets.append(ancestors)
 
-    # Read the lists
-    dowant_list = read_list('dowant')
-    ignore_list = read_list('ignore')
-    remind_list = read_remind_list()
-    delete_list = read_list('delete')
-    ok_pkgs = map(convert_to_regex,
-                  pkgs_on_list(dowant_list) + \
-                  pkgs_on_list(ignore_list) + \
-                  pkgs_on_list(remind_list))
-    regex = re.compile('^%s$' % '|'.join(ok_pkgs))
+    # Build regex for kosher packages
+    match = get_ok_matcher()
 
     # Remove every node on a wanted list
     orphaned = []
-    for curcycle in dominant_cycles:
+    for curcycle in dominant_sets:
         wanted = []
         for pkg in curcycle:
             pkg['__dominant'] = True
-            if regex.match(qualified_name(pkg)):
+            if match(pkg):
                 wanted.append(pkg)
         if len(wanted) == 0:
             orphaned += curcycle
@@ -771,10 +792,68 @@ def get_orphaned ():
 
     if VERBOSE:
         for pkg in pkgs:
-            if '__dominant' not in pkg and regex.match(qualified_name(pkg)):
+            if '__dominant' not in pkg and match(pkg):
                 print "Non-dominant, but wanted package:", qualified_name(pkg)
 
     return orphaned
+
+def why(pkg):
+    pkgs = get_pkg_graph()
+
+    if ':' in pkg:
+        name, arch = pkg.split(':', 1)
+    else:
+        name, arch = pkg, None
+
+    for pkg in pkgs:
+        if pkg['Package'] == name and arch in (None, pkg['Architecture']):
+            break
+    else:
+        die('Package is not installed')
+
+    match = get_ok_matcher()
+
+    # We now do a DFS and mark each package with it's predecessor so we can
+    # print the dependency path
+    pkg['__prev'] = None
+
+    frontier = {pkg}
+    edge = set()
+    while frontier:
+        pkg = frontier.pop()
+
+        if match(pkg):
+            edge.add(pkg)
+
+        for parent in pkg['__parents']:
+            # Add this package to the frontier if we haven't seen it already
+            if '__prev' not in parent:
+                parent['__prev'] = pkg
+                frontier.add(parent)
+
+    if not edge:
+        die('Package is orphaned')
+
+    paths = []
+    for pkg in edge:
+        path = []
+        while pkg:
+            path.append(pkg)
+            pkg = pkg['__prev']
+        paths.append(path)
+
+    if len(paths) > 1 and not VERBOSE:
+        print 'There are %d dependencies for this package.  '\
+            'Use --verbose to show them all.' % len(paths)
+        paths = [paths[0]]
+
+    for path in paths:
+        lst = emph('%s%s.pkgs' % (LIST_DIR, match(path[0])))
+        path = [qualified_name(pkg) for pkg in path]
+        print '%s: %s' % (lst, emph(' -> ').join(path))
+
+    # print len(paths)
+    # print len(set(p[0] for p in paths))
 
 def step_decide ():
     dowant_list = read_list('dowant')
@@ -824,7 +903,7 @@ def step_decide ():
             sys.stdout.write(output)
             continue
         elif opt == 'l':
-            print '\n'.join(map(qualified_name, pkgs))
+            print '\n'.join(sorted(map(qualified_name, pkgs)))
             continue
         elif opt == 'r':
             add_reminder(qualified_name(pkg), remind_list)
@@ -924,28 +1003,76 @@ def main ():
     while '--verbose' in sys.argv:
         VERBOSE = True
         sys.argv.remove('--verbose')
+
     if not os.path.exists(LIST_DIR):
         print 'Creating directory: %s' % LIST_DIR
         os.mkdir(LIST_DIR)
-    if len(sys.argv) == 2 and sys.argv[1] == 'remind':
-        sys.argv.pop(1)
-        path = '%sremind.pkgs' % LIST_DIR
-        if os.path.isfile(path):
-            os.unlink(path)
+
+    # No command, so just do our thing
     if len(sys.argv) == 1:
         step_deinstall()
         step_dowant()
         step_delete()
         step_decide()
-    elif len(sys.argv) == 3 and sys.argv[1] == '--list':
-        if   sys.argv[2] == 'orphaned':
+        return
+
+    # Usage message
+    if len(sys.argv) == 2 and sys.argv[1] in ('-h', '--help', 'help'):
+        usage()
+
+    # Accept prefix of a command
+    prefix = sys.argv[1]
+    # Command names and arg counts
+    commands = (('remind', 0),
+                ('edit'  , 1),
+                ('list'  , 1),
+                ('why'   , 1),
+                )
+    cmd = [c for c in commands if c[0].startswith(prefix)]
+
+    if len(cmd) == 0:
+        die('Unknown command: %s' % prefix)
+
+    # This cannot happen at the moment, but just like squirrels I like to
+    # prepare for the future
+    if len(cmd) > 1:
+        die('Ambiguous command: %s (could be %s)' % \
+            (prefix, ', '.join(c[0] for c in cmd)))
+
+    cmd, argc = cmd[0]
+    argv = sys.argv[2:]
+
+    if argc != len(argv):
+        die(''.join(('Expected ',
+                     'no' if argc == 0 else str(argc),
+                     ' argument',
+                     '' if argc == 1 else 's',
+                     ' but got %d' % len(argv),
+                     )
+                    ))
+
+    if   cmd == 'remind':
+        path = '%sremind.pkgs' % LIST_DIR
+        if os.path.isfile(path):
+            os.unlink(path)
+        # Remove arg and go run again
+        sys.argv.pop()
+        main()
+
+    elif cmd == 'edit':
+        print 'Not implemented'
+
+    elif cmd == 'list':
+        if   argv[0] == 'orphaned':
             print '\n'.join(qualified_name(pkg) for pkg in get_orphaned())
-        elif sys.argv[2] in ('dowant', 'ignore', 'remind', 'delete'):
+        elif argv[0] in ('dowant', 'ignore', 'remind', 'delete'):
             print show_list(sys.argv[2])
         else:
-            usage()
-    else:
-        usage()
+            lists = ('orphaned', 'dowant', 'ignore', 'remind', 'delete')
+            die('Invalid argument.  Valid is: %s.' % ', '.join(lists))
+
+    elif cmd == 'why':
+        why(argv[0])
 
 if __name__ == '__main__':
     try:
