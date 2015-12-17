@@ -1060,7 +1060,8 @@ def main ():
         main()
 
     elif cmd == 'edit':
-        print 'Not implemented'
+        editor = os.getenv('EDITOR', 'editor')
+        os.system('%s %s/%s.pkgs' % (editor, LIST_DIR, argv[0]))
 
     elif cmd == 'list':
         if   argv[0] == 'orphaned':
