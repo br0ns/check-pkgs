@@ -373,7 +373,7 @@ def do_system (cmd):
         sys.exit(ret)
 
 def sudo(cmd):
-    if os.getuid() != 0:
+    if os.geteuid() != 0:
         cmd = 'sudo ' + cmd
     do_system(cmd)
 
