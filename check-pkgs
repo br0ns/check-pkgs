@@ -1055,8 +1055,9 @@ def main ():
         path = '%sremind.pkgs' % LIST_DIR
         if os.path.isfile(path):
             os.unlink(path)
-        # Remove arg and go run again
+        # Remove arg, release PID file and go run again
         sys.argv.pop()
+        pidfile.close()
         main()
 
     elif cmd == 'edit':
