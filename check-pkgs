@@ -948,8 +948,8 @@ def main ():
         os.seteuid(uid)
 
     # Claim PID file
-    path = '/tmp/check-pkgs.pid'
-    pidfile = open(path, 'a+')
+    pid_path = '/tmp/check-pkgs.pid'
+    pidfile = open(pid_path, 'a+')
     try:
         fcntl.flock(pidfile.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except IOError:
@@ -957,7 +957,7 @@ def main ():
 
     def clean(*_):
         try:
-            os.unlink(path)
+            os.unlink(pid_path)
         except:
             pass
     atexit.register(clean)
