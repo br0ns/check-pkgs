@@ -28,21 +28,6 @@ def yesno (s, default):
             return False
         print 'Please answer yes or no'
 
-def number (s, default, range = None):
-    prompt = '%s [%d]: ' % (s, default)
-    while True:
-        opt = raw_input(prompt)
-        if opt == '':
-            return default
-        elif opt.isdigit():
-            opt = int(opt)
-            if not range or (opt >= range[0] and opt <= range[1]):
-                return int(opt)
-        s = 'Please type a number'
-        if range:
-            s += ' (%d -- %d)' % (range[0], range[1])
-        print s
-
 def optlist (opts, default, numbers = False):
     if isinstance(default, (int, long)):
         default = opts[default][0]
@@ -188,19 +173,6 @@ def version_compatible(ver1, op, ver2):
     }
 
     return cmps[op][version_compare(ver1, ver2)+1]
-
-def uniqify(vs):
-    return sorted(set(vs))
-    res = []
-    for v in vs:
-        seen = False
-        for r in res:
-            if r == v:
-                seen = True
-                break
-        if not seen:
-            res.append(v)
-    return res
 
 def qualified_name(pkg):
     return pkg.setdefault('__qname',
@@ -691,9 +663,6 @@ def get_pkg_graph():
         b = list(bs)[0]
         a['__children'].add(b)
         b['__parents'].add(a)
-    for pkg in pkgs:
-        pkg['__children'] = pkg['__children']
-        pkg['__parents'] = pkg['__parents']
 
     return pkgs
 
@@ -979,8 +948,8 @@ def main ():
         os.seteuid(uid)
 
     # Claim PID file
-    path = '/tmp/check-pkgs.pid'
-    pidfile = open(path, 'a+')
+    pid_path = '/tmp/check-pkgs.pid'
+    pidfile = open(pid_path, 'a+')
     try:
         fcntl.flock(pidfile.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except IOError:
@@ -988,7 +957,7 @@ def main ():
 
     def clean(*_):
         try:
-            os.unlink(path)
+            os.unlink(pid_path)
         except:
             pass
     atexit.register(clean)
