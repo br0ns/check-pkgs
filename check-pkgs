@@ -211,6 +211,8 @@ def parse_dpkg ():
                 must_fix.append(pkg)
 
             pkg['__raw'] = rawdata
+            # XXX: Hack let a package `Provide:` different versions
+            pkg['Version'] = [pkg['Version']]
             pkgs.append(pkg)
             rawdata = ''
             pkg = Package()
@@ -265,6 +267,7 @@ def is_installed (pkg):
 
 def build_name_map (packages):
     name_map = {}
+    ver_regex = re.compile(r'^(\S+) \(= (\S+)\)$')
 
     def add (name, cur):
         name_map.setdefault(name, []).append(cur)
@@ -273,6 +276,12 @@ def build_name_map (packages):
         add(pkg['Package'], pkg)
         if 'Provides' in pkg:
             for alt_name in pkg['Provides'].split(', '):
+                # XXX: Strip version info -- we should probably use it for
+                #      something tho'...
+                m = ver_regex.match(alt_name)
+                if m:
+                    alt_name, alt_ver = m.groups()
+                    pkg['Version'].append(alt_ver)
                 add(alt_name, pkg)
 
     return name_map
@@ -304,8 +313,10 @@ def build_dependency_map (pkgs, name_map):
                arch == 'all' or \
                candidate.get('Multi-Arch', 'no') == 'foreign' or \
                candidate.get('Multi-Arch', 'no') == 'allowed' and do_any:
-                if ver_cmp(candidate['Version']):
-                    result.append(candidate)
+                for ver in candidate['Version']:
+                    if ver_cmp(ver):
+                        result.append(candidate)
+                        break
 
         return result
 
