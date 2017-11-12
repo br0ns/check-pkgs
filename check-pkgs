@@ -8,6 +8,10 @@ LIST_DIR = '%s/.pkgs/' % pwd.getpwuid(os.stat(__file__).st_uid).pw_dir
 # Flag for printing out extra stuff
 VERBOSE = False
 
+# Regard recommended/suggested packages as dependencies
+RECOMMENDS = False
+SUGGESTS = False
+
 def die (s = '', exit_code = 1):
     print >>sys.stderr, s
     sys.exit(exit_code)
@@ -321,7 +325,7 @@ def build_dependency_map (pkgs, name_map):
 
         return result
 
-    def add_dependencies(pkg, depends):
+    def add_dependencies(pkg, depends, soft=False):
         depends = depends.strip()
         if not depends:
             return
@@ -330,12 +334,17 @@ def build_dependency_map (pkgs, name_map):
             dependencies = []
             for dep_name in depend.split(' | '):
                 dependencies.extend(find_satisfies(pkg['Architecture'], dep_name))
-            assert len(dependencies) >= 1
+            if not soft:
+                assert len(dependencies) >= 1
             dependency_map.append((pkg, set(dependencies)))
 
     for pkg in pkgs:
         for n in ['Depends', 'Pre-Depends']:
             add_dependencies(pkg, pkg.get(n, ''))
+        if RECOMMENDS:
+            add_dependencies(pkg, pkg.get('Recommends', ''), soft=True)
+        if SUGGESTS:
+            add_dependencies(pkg, pkg.get('Suggests', ''), soft=True)
 
     return dependency_map
 
@@ -981,9 +990,14 @@ def main ():
     pidfile.seek(0)
 
     # And go!
-    while '--verbose' in sys.argv:
-        VERBOSE = True
-        sys.argv.remove('--verbose')
+
+    # Handle optional arguments
+    optargs = ('verbose', 'recommends', 'suggests')
+    for optarg in optargs:
+        flag = '--' + optarg
+        while flag in sys.argv:
+            globals()[optarg.upper()] = True
+            sys.argv.remove(flag)
 
     if not os.path.exists(LIST_DIR):
         print 'Creating directory: %s' % LIST_DIR
