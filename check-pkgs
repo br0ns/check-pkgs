@@ -299,11 +299,12 @@ def build_dependency_map (pkgs, name_map):
             name, ver_op, ver_num = m.group(1), m.group(2), m.group(3)
             ver_cmp = lambda v: version_compatible(v, ver_op, ver_num)
 
+        do_any = False
         if name.endswith(':any'):
             do_any = True
             name = name[:-4]
-        else:
-            do_any = False
+        elif ':' in name:
+            name, arch = name.split(':', 1)
 
         result = []
 
