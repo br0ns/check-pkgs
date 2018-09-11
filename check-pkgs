@@ -537,6 +537,7 @@ def step_dowant ():
             opt = optlist([('i', 'Install all wanted packages'),
                            ('a', 'Ask me about each package individually'),
                            ('c', 'Continue without installing anything'),
+                           ('r', 'Remove all from wanted packages'),
                            ('l', 'List packages'),
                           ], 'i')
             if   opt == 'i':
@@ -561,6 +562,11 @@ def step_dowant ():
                     elif opt == 'r':
                         del_from_list(pkg, dowant_list)
                         write_list('dowant', dowant_list)
+                break
+            elif opt == 'r':
+                for pkg in to_install:
+                    del_from_list(pkg, dowant_list)
+                    write_list('dowant', dowant_list)
                 break
             elif opt == 'l':
                 print 'Wanted but not installed:'
