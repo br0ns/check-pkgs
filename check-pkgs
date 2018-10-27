@@ -788,8 +788,10 @@ def get_orphaned ():
 
     if VERBOSE:
         for pkg in pkgs:
-            if '__dominant' not in pkg and match(pkg):
-                print "Non-dominant, but wanted package:", qualified_name(pkg)
+            lst = match(pkg)
+            if '__dominant' not in pkg and lst:
+                print "Non-dominant package '%s' in %s.pkgs" % \
+                    (qualified_name(pkg), lst)
 
     return orphaned
 
